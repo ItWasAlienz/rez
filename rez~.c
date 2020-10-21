@@ -42,6 +42,7 @@ typedef struct _rez {
     t_ptr_int rxfad;
     t_ptr_int xfad;
     t_ptr_int rspprev;
+    t_ptr_int oneshot;
     t_double rphprev;
     t_double dpos;
     t_double xpos;
@@ -59,7 +60,6 @@ typedef struct _rez {
     t_bool rinOderAus;
 	t_bool buf_modd;
     t_bool wram;
-    t_bool oneshot;
     t_bool nshot;
     t_bool rnshot;
 } t_rez;
@@ -141,7 +141,7 @@ void ext_main(void *r)
     CLASS_ATTR_SAVE(c, "fade", 0);
     CLASS_ATTR_ACCESSORS(c, "fade", (method)rez_attrfad_get, (method)rez_attrfad_set);
     
-    CLASS_ATTR_LONG(c, "oneshot", 0, t_rez, oneshot);
+    CLASS_ATTR_CHAR(c, "oneshot", 0, t_rez, oneshot);
     CLASS_ATTR_SAVE(c, "oneshot", 0);
     CLASS_ATTR_ACCESSORS(c, "oneshot", (method)rez_attr1shot_get, (method)rez_attr1shot_set);
     
@@ -761,73 +761,83 @@ void rez_psperform64(t_rez *x, t_object *d64, double **is, long numis, double **
     long         n=smps;                                           float *b;
     t_double     phprev,inpos,dpos,sp,frac;
     t_double     spprev,oL,oR,oPh,xL,xR,xpos,scldsr;
-    t_ptr_int    bnc,bframes,pstart,pend,nstart,nend,indx,indxz,indxb,indxc,xfad,pfad,fade;
-    t_bool       wr,pparamch,inOderAus,oneshot;
+    t_ptr_int    bnc,bframes,pstart,pend,nstart,nend;
+    t_ptr_int    indx,indxz,indxb,indxc,xfad,pfad,fade;
+    t_bool       wr,pparamch,inOderAus,oneshot,nshot;
     t_buffer_obj *buffer=buffer_ref_getobject(x->buf);
 
     b = buffer_locksamples(buffer);                   if(!b||x->obj.z_disabled) goto zero;
-    if(x->buf_modd){ x->buf_modd=false; rez_limits(x); } oneshot=x->oneshot; nstart=x->nstart;
+    if(x->buf_modd){ x->buf_modd=false; rez_limits(x); } oneshot=x->oneshot; nshot=x->nshot;
     bnc=x->bchan; bframes=x->bframes-1; pstart=x->pstart; pend=x->pend; inOderAus=x->inOderAus;
-    pparamch=x->pparamchange; pfad=x->pfad; xfad=x->xfad; fade=x->fade; xpos=x->xpos;
-    wr=x->wr; phprev=x->phprev; spprev=x->spprev; dpos=x->dpos; scldsr=x->srscale; nend=x->nend;
-    
+    pparamch=x->pparamchange; pfad=x->pfad; xfad=x->xfad; fade=x->fade; xpos=x->xpos; wr=x->wr;
+    phprev=x->phprev; spprev=x->spprev;  dpos=x->dpos; scldsr=x->srscale;
+    nend=x->nend; nstart=x->nstart;
     while(n--)
     {
         inpos=*ph++; sp=*spd++;
         inpos=(inpos<0.0)?0.0:((inpos>1.0)?1.0:inpos); inpos*=bframes; sp*=scldsr;
-
-        if(oneshot)
+//inOderAus(from SachaBaronCohen's "Bruno" skit)-flag indicates if position is 'in'/'out' of a loop..
+//..if 'in' loop-boundary,save messages(pstart/pend) internally(nstart/nend)
+        if(oneshot)//ONESHOT_SECTION
         {
-            if((spprev==0.0)&&(sp!=0.0))
-            { dpos=inpos; spprev=sp; pfad=fade; inOderAus=1; nend=pend; nstart=pstart; }
-            else if(((spprev!=0.0)&&(sp==0.0))&&(inOderAus==1)){ pfad=fade; inOderAus=0; }
-            if (inOderAus)
-            {
-                if(wr){
-                    if(((dpos>(nend-(fade+1)))&&(dpos<(nstart+(fade+1))))&&(pfad<0))
-                    { inOderAus=0; pfad=fade; }
-                }else
+            //......................................ONESHOT-PLAYBACK
+            if((spprev==0.0)&&(sp!=0.0))//on speed-change for 'on',check position from loop bounds..
+            {     //..setup fade-in/fade-out,internal one-shot flag(nshot),& position/speed changes
+                dpos=inpos; pfad=fade-1; nshot=1; spprev=sp;
+                if(wr)
                 {
-                    if(((dpos>(nend-(fade+1)))||(dpos<(nstart+(fade+1))))&&(pfad<0))
-                    { inOderAus=0; pfad=fade; }
+                    if((dpos>(pend-fade))&&(dpos<(pstart+fade))){ inOderAus=0; }
+                    else { inOderAus=1; nstart=pstart; nend=pend; }
                 }
-                
-                if(dpos>bframes)dpos-=(bframes+1);  if(dpos<0)dpos+=(bframes+1);  indx=trunc(dpos);
-                if(sp>0){ frac=dpos-indx; }else if(sp<0){ frac=1.0-(dpos-indx); }else frac=0.0; dpos+=sp;
+                else{ if((dpos>(pend-fade))||(dpos<(pstart+fade)))
+                { inOderAus=0; }else{ inOderAus=1; nstart=pstart; nend=pend; } }
+            }
+            else if(((spprev!=0.0)&&(sp==0.0)) && nshot){ pfad=fade-1; nshot=0; }
+            
+            if(nshot)    //nshot flag determines if the state is fading-in/playing-back-regular..
+            {
+                if(wr)
+                {
+                    if((dpos<(pend-fade))||(dpos>(pstart+fade)))
+                    { inOderAus=1; nstart=pstart; nend=pend; }
+                }
+                else
+                {
+                    if((dpos<(pend-fade))&&(dpos>(pstart+fade)))
+                    { inOderAus=1; nstart=pstart; nend=pend; }
+                }
+                if(inOderAus)
+                {
+                    if(wr){ if((dpos>=(nend-fade))&&(dpos<=(nstart+fade))){ pfad=fade-1; nshot=0; } }
+                    else{ if((dpos>=(nend-fade))||(dpos<=(nstart+fade))){ pfad=fade-1; nshot=0; } }
+                }
+                //buffer~-boundary constraint, positional-increment, and bicubic interpolation
+                if(dpos>bframes)dpos-=(bframes+1);  if(dpos<0)dpos+=(bframes+1); indx=trunc(dpos);
+                if(sp>0){frac=dpos-indx;}else if(sp<0){frac=1.0-(dpos-indx);}else frac=0.0; dpos+=sp;
                 interp_index(indx,&indxz,&indxb,&indxc,sp,bframes);
                 xL = interp(frac, b[indxz*bnc], b[indx*bnc], b[indxb*bnc], b[indxc*bnc]);
                 xR = interp(frac, b[indxz*bnc+1], b[indx*bnc+1], b[indxb*bnc+1], b[indxc*bnc+1]);
-
-                if(pfad>=0)   //.......................Fade-In
-                { oL=eas_func_up(xL,fade,pfad); oR=eas_func_up(xR,fade,pfad); pfad--; }
-                else if(xfad>=0)//..Crossfades(happen at loop-points,phase-changes,and abrupt pos/neg)
-                {
-                    if(xpos>bframes)xpos-=(bframes+1); if(xpos<0)xpos+=(bframes+1); indx=trunc(xpos);
-                    if(sp>0){frac=xpos-indx;}else if(sp<0){frac=1.0-(xpos-indx);}else frac=0.0;
-                    xpos+=sp;
-                    interp_index(indx,&indxz,&indxb,&indxc,sp,bframes);
-                    oL = interp(frac, b[indxz*bnc], b[indx*bnc], b[indxb*bnc], b[indxc*bnc]);
-                    oR = interp(frac, b[indxz*bnc+1], b[indx*bnc+1], b[indxb*bnc+1], b[indxc*bnc+1]);
-                    oL = eas_func_up(xL, fade, xfad) + eas_func_dwn(oL, fade, xfad);
-                    oR = eas_func_up(xR, fade, xfad) + eas_func_dwn(oR, fade, xfad); xfad--;
-                }else{ oL=xL; oR=xR; }  //..<-Regular Playback + Phase-History
+                //fade-in
+                if(pfad>=0){ oL=eas_func_up(xL,fade,pfad); oR=eas_func_up(xR,fade,pfad); pfad--; }
+                else{ oL=xL; oR=xR; }
             }
-            else
-            {//......................................Fade-Out
-                    if(pfad>=0)
-                    {
-                        if(dpos>bframes)dpos-=(bframes+1); if(dpos<0)dpos+=(bframes+1); indx=trunc(dpos);
-                        if(spd>0){frac=dpos-indx;}else if(spd<0){frac=1.0-(dpos-indx);}else frac=0.0;
-                        dpos+=spprev;
-                        interp_index(indx,&indxz,&indxb,&indxc,sp,bframes);
-                        xL = interp(frac, b[indxz*bnc], b[indx*bnc], b[indxb*bnc], b[indxc*bnc]);
-                        xR = interp(frac, b[indxz*bnc+1], b[indx*bnc+1], b[indxb*bnc+1], b[indxc*bnc+1]);
-                        oL = eas_func_dwn(xL, fade, pfad); oR = eas_func_dwn(xR, fade, pfad); pfad--;
-                    }else{ oL = oR = 0.; spprev=sp; }  //.........<-Everything Off
+            else        //..or(when nshot is 0, the state is) fading-out/silenced
+            {//fade-Out
+                if(pfad>=0)
+                { //buffer~-boundary constraint, positional-increment, and bicubic interpolation
+                    if(dpos>bframes)dpos-=(bframes+1); if(dpos<0)dpos+=(bframes+1); indx=trunc(dpos);
+                    if(spd>0){frac=dpos-indx;}else if(spd<0){frac=1.0-(dpos-indx);}else frac=0.0;
+                    dpos+=spprev;
+                    interp_index(indx,&indxz,&indxb,&indxc,sp,bframes);
+                    xL = interp(frac, b[indxz*bnc], b[indx*bnc], b[indxb*bnc], b[indxc*bnc]);
+                    xR = interp(frac, b[indxz*bnc+1], b[indx*bnc+1], b[indxb*bnc+1], b[indxc*bnc+1]);
+                    oL = eas_func_dwn(xL, fade, pfad); oR = eas_func_dwn(xR, fade, pfad);
+                    pfad--; if(pfad<0)spprev=sp;
+                }else{ oL = oR = 0.; spprev=sp; }  //.........<-Everything Off
             }
         }
-        else
-        {
+        else//LOOPER_(not_oneshot)_SECTION
+        {       //.....................................LOOPER-PLAYBACK
             if((sp!=spprev)&&(xfad<0))
             {if((((spprev==0.0)&&(sp!=0.0))||((spprev!=0.0)&&(sp==0.0)))&&(pfad<0)){pfad=fade;}//onoff
             else if(((spprev<0)&&(sp>0))||((spprev>0)&&(sp<0))){xfad=fade;xpos=dpos;}}//xfad neg<->pos
@@ -841,7 +851,7 @@ void rez_psperform64(t_rez *x, t_object *d64, double **is, long numis, double **
                     if(pfad<0){xfad=fade; xpos=dpos;} phprev=dpos=inpos;
                 }
                 if(pparamch)
-                {                                               //window changes
+                {                                      //window changes
                     if(wr){
                         if(((dpos>pend)&&(dpos<pstart))&&((pend>nend)||(pstart<nstart)))
                             inOderAus=0; else inOderAus=1;
@@ -850,7 +860,7 @@ void rez_psperform64(t_rez *x, t_object *d64, double **is, long numis, double **
                             inOderAus=0; else inOderAus=1;
                     }
                 }
-                
+                                                //crossfade at playback-loop boundaries
                 if((inOderAus)&&(xfad<0))
                 {
                     if(pparamch){ pparamch=0; nend=pend; nstart=pstart; }
@@ -868,8 +878,8 @@ void rez_psperform64(t_rez *x, t_object *d64, double **is, long numis, double **
                         }
                     }
                 }
-                else
-                {
+                else        //if starting off outside of loop-boundaries, play until within...
+                {         //..and once within, save messages(pstart/pend) internally(nstart/nend)
                     if(wr)
                     {if((dpos<=pend)||(dpos>=pstart)){pparamch=0; inOderAus=1; nend=pend; nstart=pstart;}}
                     else
@@ -894,7 +904,7 @@ void rez_psperform64(t_rez *x, t_object *d64, double **is, long numis, double **
                     oR = interp(frac, b[indxz*bnc+1], b[indx*bnc+1], b[indxb*bnc+1], b[indxc*bnc+1]);
                     oL = eas_func_up(xL, fade, xfad) + eas_func_dwn(oL, fade, xfad);
                     oR = eas_func_up(xR, fade, xfad) + eas_func_dwn(oR, fade, xfad); xfad--;
-                }else{ oL=xL; oR=xR; }  //..<-Regular Playback + Phase-History
+                }else{ oL=xL; oR=xR; }  //..<-Regular Playback
                 spprev=sp;
             }
             else
@@ -908,17 +918,17 @@ void rez_psperform64(t_rez *x, t_object *d64, double **is, long numis, double **
                     xL = interp(frac, b[indxz*bnc], b[indx*bnc], b[indxb*bnc], b[indxc*bnc]);
                     xR = interp(frac, b[indxz*bnc+1], b[indx*bnc+1], b[indxb*bnc+1], b[indxc*bnc+1]);
                     oL = eas_func_dwn(xL, fade, pfad); oR = eas_func_dwn(xR, fade, pfad); pfad--;
-                    if(pfad<=0)spprev=sp;
-                }else{ oL = oR = 0.; }  //.........<-Everything Off
+                    if(pfad<0)spprev=sp;
+                }else{ oL = oR = 0.; spprev=sp; }  //<-Everything Off
             }
         }
         
         oPh=dpos/bframes; //<-convert samp-index 2 phase
         *outL++ = oL; *outR++ = oR; *outPh++ = oPh;
     }
-    buffer_unlocksamples(buffer);
-    x->pparamchange=pparamch; x->xfad=xfad; x->pfad=pfad; x->xpos=xpos; x->phprev=phprev;
-    x->dpos=dpos; x->inOderAus=inOderAus; x->nend=nend; x->nstart=nstart; x->spprev=spprev;
+    buffer_unlocksamples(buffer); x->nshot=nshot; x->phprev=phprev; x->spprev=spprev;
+    x->pparamchange=pparamch; x->xfad=xfad; x->pfad=pfad; x->xpos=xpos;
+    x->dpos=dpos; x->inOderAus=inOderAus; x->nend=nend; x->nstart=nstart;
     return;
     
 zero: while(n--){ *outL++=0.; *outR++=0.; *outPh++=0.; }
@@ -934,67 +944,91 @@ void rez_rsperform64(t_rez *x, t_object *d64, double **is, long numis, double **
     t_double        *outRPh = os[0];
 
     long         n=smps;                                           float *b;
-    t_double     rcL,rcR,rpos,rxpos,rsp,oRPh,odb,rphprev,rinpos;
+    t_double     rcL,rcR,rpos,rxpos,rsp;
+    t_double     oRPh,odb,rphprev,rinpos;
     t_ptr_int    rndx,rxdx,bnc,bframes,rstart,rend,nrstart,nrend,rfad,rxfad,fade,rs,rspprev;
-    t_bool       rwr,rparamch,rinOderAus,wram,oneshot;
+    t_bool       rwr,rparamch,rinOderAus,wram,oneshot,rnshot;
     t_buffer_obj *buffer=buffer_ref_getobject(x->buf);
 
     b = buffer_locksamples(buffer);                   if(!b||x->obj.z_disabled) goto zero;
-    if(x->buf_modd){ x->buf_modd=false; rez_limits(x); } oneshot=x->oneshot; wram=x->wram;
-    bnc=x->bchan; bframes=x->bframes-1; fade=x->fade; nrend=x->nrend; nrstart=x->nrstart; rwr=x->rwr;
-    rparamch=x->rparamchange; rfad=x->rfad; rstart=x->rstart; rend=x->rend; rphprev=x->rphprev;
-    rxfad=x->rxfad; rxpos=x->rxpos; rspprev=x->rspprev; rinOderAus=x->rinOderAus; rpos=x->rpos;
+    if(x->buf_modd){ x->buf_modd=false; rez_limits(x); } oneshot=x->oneshot;
+    bnc=x->bchan; bframes=x->bframes-1; fade=x->fade;
+    rpos=x->rpos; rparamch=x->rparamchange; rfad=x->rfad; rstart=x->rstart; rend=x->rend;
+    rnshot=x->rnshot; rphprev=x->rphprev; wram=x->wram; nrend=x->nrend; nrstart=x->nrstart;
+    rxfad=x->rxfad; rxpos=x->rxpos; rspprev=x->rspprev; rwr=x->rwr; rinOderAus=x->rinOderAus;
     
     while(n--)
     {
         rinpos=*rph++; rsp=*rspd++; odb=*ovdb++; rcL=*rinL++; rcR=*rinR++;
         rinpos=(rinpos<0.0)?0.0:((rinpos>1.0)?1.0:rinpos); rinpos*=bframes;
         if(rsp>0.0) rs=1; else if(rsp<0.0) rs=-1; else rs=0;
-        
-                        //.........................................RECORDING
-        if(oneshot)
-        {
-            if((rspprev==0)&&(rs!=0))
-            { rpos=rinpos; rspprev=rs; rfad=fade; wram=1; rinOderAus=1; nrend=rend; nrstart=rstart; }
-            else if(((rspprev!=0)&&(rs==0))&&(rinOderAus==1)){ rfad=fade; rinOderAus=0; }
-            if (rinOderAus)
-            {
-                if(rwr){
-                    if(((rpos>(nrend-(fade+1)))&&(rpos<(nrstart+(fade+1))))&&(rfad<0))
-                    { rinOderAus=0; rfad=fade; }
-                }else
+//inOderAus(from SachaBaronCohen's "Bruno" skit)-flag indicates if position is 'in'/'out' of a loop..
+//..if 'in' loop-boundary,save messages(pstart/pend/rstart/rend) internally(nstart/nend/nrstart/nrend)
+        if(oneshot)//ONESHOT_SECTION
+        {               //..........................ONESHOT-RECORDING
+            if((rspprev==0)&&(rs!=0))//on speed-change for 'on',check position from loop bounds..
+            {       //..setup fade-in/fade-out,internal one-shot flag(nshot),& pos/speed changes
+                rpos=rinpos; rfad=fade-1; wram=1; rnshot=1; rspprev=rs;
+                if(rwr)
                 {
-                    if(((rpos>(nrend-(fade+1)))||(rpos<(nrstart+(fade+1))))&&(rfad<0))
-                    { rinOderAus=0; rfad=fade; }
+                    if((rpos>(rend-fade))&&(rpos<(rstart+fade))){ rinOderAus=0; }
+                    else { rinOderAus=1; nrstart=rstart; nrend=rend; }
                 }
-                
-                if(rpos>bframes)rpos=0;  if(rpos<0)rpos=bframes; rndx=trunc(rpos); rpos+=rs;
-                if(rfad>=0)     //........................Fade-In
+                else
+                {
+                    if((rpos>(rend-fade))||(rpos<(rstart+fade))){ rinOderAus=0; }
+                    else { rinOderAus=1; nrstart=rstart; nrend=rend; }
+                }
+            }
+            else if(((rspprev!=0)&&(rs==0)) && rnshot){ rfad=fade-1; rnshot=0; }
+            
+            if(rnshot)//rnshot flag determines if the state is fading-in-recording/recording-regular..
+            {
+                if(rwr)
+                {
+                    if((rpos<(rend-fade))||(rpos>(rstart+fade)))
+                    { rinOderAus=1; nrstart=rstart; nrend=rend; }
+                }
+                else
+                {
+                    if((rpos<(rend-fade))&&(rpos>(rstart+fade)))
+                    { rinOderAus=1; nrstart=rstart; nrend=rend; }
+                }
+                if(rinOderAus)
+                {
+                    if(rwr)
+                    { if((rpos>=(nrend-fade))&&(rpos<=(nrstart+fade))){ rfad=fade-1; rnshot=0; } }
+                    else
+                    { if((rpos>=(nrend-fade))||(rpos<=(nrstart+fade))){ rfad=fade-1; rnshot=0; } }
+                }
+                        //buffer~-boundary constraint, and positional-increment
+                if(rpos>bframes)rpos=0;  if(rpos<0)rpos=bframes; rndx=rpos; rpos+=rs;
+                if(rfad>=0)//Fade-In
                 {
                     b[rndx*bnc]=eas_func_up(rcL,fade,rfad)+eas_rec_up(b[rndx*bnc],fade,1-odb,rfad);
                     b[rndx*bnc+1]=eas_func_up(rcR,fade,rfad)+eas_rec_up(b[rndx*bnc+1],fade,1-odb,rfad);
                     rfad--;
-                }else{b[rndx*bnc]=rcL+(b[rndx*bnc]*odb); b[rndx*bnc+1]=rcR+(b[rndx*bnc+1]*odb);};
+                }else{ b[rndx*bnc]=rcL+(b[rndx*bnc]*odb); b[rndx*bnc+1]=rcR+(b[rndx*bnc+1]*odb); };
             }
-            else
+            else    //..or(when rnshot is 0, the state is) fading-out-recording/stopped-recording
             {
                 if(rfad>=0)
-                {
-                    if(rpos>bframes)rpos=0;  if(rpos<0)rpos=bframes; rndx=trunc(rpos); rpos+=rspprev;
+                {                 //....buffer~-boundary constraint, and positional-increment
+                    if(rpos>bframes)rpos=0;  if(rpos<0)rpos=bframes; rndx=rpos; rpos+=rspprev;
                     b[rndx*bnc]=eas_func_dwn(rcL,fade,rfad)+eas_rec_dwn(b[rndx*bnc],fade,1-odb,rfad);
                     b[rndx*bnc+1]=eas_func_dwn(rcR,fade,rfad)+eas_rec_dwn(b[rndx*bnc+1],fade,1-odb,rfad);
-                    rfad--; if(rfad<0) { wram=0; }
-                }else rspprev=rs;
+                    rfad--; if(rfad<0) { wram=0; rspprev=rs; }
+                } else { rspprev=rs; }
             }
         }
-        else
-        {
+        else//LOOPER_(not_oneshot)_SECTION
+        {       //................................LOOPER-RECORDING
             if((rs!=rspprev)&&(rfad<0))
             {
-                if(((rspprev==0)&&(rs!=0))&&(rfad<0)){ rfad=fade; wram=1; rspprev=rs; }
-                else if (((rspprev!=0)&&(rs==0))&&(rfad<0)){ rfad=fade; }
-                else if(((rspprev<0)&&(rs>0))||((rspprev>0)&&(rs<0))){rxfad=fade;rxpos=rpos;}
-            }//onoff
+                if(((rspprev==0)&&(rs!=0))&&(rfad<0)){ rfad=fade-1; wram=1; rspprev=rs; }
+                else if (((rspprev!=0)&&(rs==0))&&(rfad<0)){ rfad=fade-1; }
+                else if(((rspprev<0)&&(rs>0))||((rspprev>0)&&(rs<0))){ rxfad=fade; rxpos=rpos; }
+            }
             
             if(rs!=0)
             {
@@ -1015,10 +1049,10 @@ void rez_rsperform64(t_rez *x, t_object *d64, double **is, long numis, double **
                             rinOderAus=0; else rinOderAus=1;
                     }
                 }
-                
+                                            //recording-crossfade at loop boundaries
                 if((rinOderAus)&&(rxfad<0))
-                {
-                    if(rparamch){ rparamch=0; nrend=rend; nrstart=rstart; }
+                {                                //rparamch = flag to notify when there's incoming..
+                    if(rparamch){ rparamch=0; nrend=rend; nrstart=rstart; }//..message-set loop-bounds
                     if(rwr){
                         if((rpos>nrend)&&(rpos<nrstart))
                         {
@@ -1033,8 +1067,8 @@ void rez_rsperform64(t_rez *x, t_object *d64, double **is, long numis, double **
                         }
                     }
                 }
-                else
-                {
+                else        //if starting off outside of loop-boundaries, record until within...
+                {       //..and once within, save messages(rstart/rend) internally(nrstart/nrend)
                     if(rwr)
                     {if((rpos<=rend)||(rpos>=rstart))
                     {rparamch=0; rinOderAus=1; nrend=rend; nrstart=rstart;}}
@@ -1045,7 +1079,7 @@ void rez_rsperform64(t_rez *x, t_object *d64, double **is, long numis, double **
                 
                 if(rpos>bframes)rpos=0;  if(rpos<0)rpos=bframes; rndx=trunc(rpos); rpos+=rs;
                 if(rxfad>=0) //....Crossfades(happen at loop-points and phase changes)
-                {
+                {                    //crossfade-point buffer~-boundary constraint and increment
                     if(rxpos>bframes)rxpos=0; if(rxpos<0)rxpos=bframes; rxdx=trunc(rxpos); rxpos+=rs;
                     b[rxdx*bnc]=eas_func_dwn(rcL,fade,rxfad)+eas_rec_dwn(b[rxdx*bnc],fade,1-odb,rxfad);
                     b[rxdx*bnc+1]=eas_func_dwn(rcR,fade,rxfad)+eas_rec_dwn(b[rxdx*bnc+1],fade,1-odb,rxfad);
@@ -1053,29 +1087,30 @@ void rez_rsperform64(t_rez *x, t_object *d64, double **is, long numis, double **
                     b[rndx*bnc+1]=eas_func_up(rcR,fade,rxfad)+eas_rec_up(b[rndx*bnc+1],fade,1-odb,rxfad);
                     rxfad--;
                 }
-                else if(rfad>=0)     //........................Fade-In
+                else if(rfad>=0)     //...................Fade-In
                 {
                     b[rndx*bnc]=eas_func_up(rcL,fade,rfad)+eas_rec_up(b[rndx*bnc],fade,1-odb,rfad);
                     b[rndx*bnc+1]=eas_func_up(rcR,fade,rfad)+eas_rec_up(b[rndx*bnc+1],fade,1-odb,rfad);rfad--;
                 } else { b[rndx*bnc]=rcL+(b[rndx*bnc]*odb); b[rndx*bnc+1]=rcR+(b[rndx*bnc+1]*odb); }
             }
             else
-            {       //.......................................Fade-Out
+            {       //...................................Fade-Out
                 if(rfad>=0)
                 {
                     if(rpos>bframes)rpos=0;  if(rpos<0)rpos=bframes; rndx=trunc(rpos); rpos+=rspprev;
                     b[rndx*bnc]=eas_func_dwn(rcL,fade,rfad)+eas_rec_dwn(b[rndx*bnc],fade,1-odb,rfad);
                     b[rndx*bnc+1]=eas_func_dwn(rcR,fade,rfad)+eas_rec_dwn(b[rndx*bnc+1],fade,1-odb,rfad);
                     rfad--; if(rfad<0) { wram=0; rspprev=rs; }
-                }
+                }else{ rspprev=rs; }
             }
         }
+        
         oRPh=rpos/bframes;//<-convert samp-index 2 phase
         *outRPh++ = oRPh;
     }
-    if(wram)buffer_setdirty(buffer); buffer_unlocksamples(buffer); x->rparamchange=rparamch;
-    x->rphprev=rphprev; x->rspprev=rspprev; x->rxpos=rxpos; x->rpos=rpos; x->rinOderAus=rinOderAus;
-    x->rfad=rfad; x->nrend=nrend; x->nrstart=nrstart; x->rxfad=rxfad; x->wram=wram;
+    if(wram)buffer_setdirty(buffer); buffer_unlocksamples(buffer); x->rnshot=rnshot; x->wram=wram;
+    x->rparamchange=rparamch; x->rphprev=rphprev; x->rspprev=rspprev; x->rxpos=rxpos; x->rxfad=rxfad;
+    x->rpos=rpos; x->rinOderAus=rinOderAus; x->rfad=rfad; x->nrend=nrend; x->nrstart=nrstart;
     return;
     
 zero: while(n--){ *outRPh++=0.; }
@@ -1098,16 +1133,17 @@ void rez_mperform64(t_rez *x, t_object *d64, double **is, long numis, double **o
     t_double     spprev,oL,oPh,oRPh,xL,xpos,scldsr,odb,rphprev,rinpos;
     t_ptr_int    rndx,rxdx,bnc,bframes,pstart,pend,rstart,rend,nstart,nend,nrstart,nrend;
     t_ptr_int    indx,indxz,indxb,indxc,xfad,pfad,rfad,rxfad,fade,rs,rspprev;
-    t_bool       wr,rwr,pparamch,rparamch,inOderAus,rinOderAus,wram,oneshot;
+    t_bool       wr,rwr,pparamch,rparamch,inOderAus,rinOderAus,wram,oneshot,nshot,rnshot;
     t_buffer_obj *buffer=buffer_ref_getobject(x->buf);
 
     b = buffer_locksamples(buffer);                   if(!b||x->obj.z_disabled) goto zero;
-    if(x->buf_modd){ x->buf_modd=false; rez_limits(x); } oneshot=x->oneshot;
+    if(x->buf_modd){ x->buf_modd=false; rez_limits(x); } oneshot=x->oneshot; nshot=x->nshot;
     bnc=x->bchan; bframes=x->bframes-1; pstart=x->pstart; pend=x->pend; inOderAus=x->inOderAus;
-    pparamch=x->pparamchange; pfad=x->pfad; xfad=x->xfad; fade=x->fade; xpos=x->xpos; rpos=x->rpos;
-    wr=x->wr;  rparamch=x->rparamchange; rfad=x->rfad; rstart=x->rstart; rend=x->rend;
-    phprev=x->phprev; rphprev=x->rphprev; spprev=x->spprev;  dpos=x->dpos; wram=x->wram;
-    scldsr=x->srscale; nend=x->nend; nstart=x->nstart; nrend=x->nrend; nrstart=x->nrstart;
+    pparamch=x->pparamchange; pfad=x->pfad; xfad=x->xfad; fade=x->fade; xpos=x->xpos;
+    rpos=x->rpos; wr=x->wr;  rparamch=x->rparamchange; rfad=x->rfad;
+    rstart=x->rstart; rend=x->rend; rnshot=x->rnshot; phprev=x->phprev; rphprev=x->rphprev;
+    spprev=x->spprev;  dpos=x->dpos; wram=x->wram; scldsr=x->srscale;
+    nend=x->nend; nstart=x->nstart; nrend=x->nrend; nrstart=x->nrstart;
     rxfad=x->rxfad; rxpos=x->rxpos; rspprev=x->rspprev; rwr=x->rwr; rinOderAus=x->rinOderAus;
     
     while(n--)
@@ -1116,91 +1152,125 @@ void rez_mperform64(t_rez *x, t_object *d64, double **is, long numis, double **o
         inpos=(inpos<0.0)?0.0:((inpos>1.0)?1.0:inpos); inpos*=bframes; sp*=scldsr;
         rinpos=(rinpos<0.0)?0.0:((rinpos>1.0)?1.0:rinpos); rinpos*=bframes;
         if(rsp>0.0) rs=1; else if(rsp<0.0) rs=-1; else rs=0;
-        
-                        //.........................................RECORDING
-        if(oneshot)
-        {
-            if((rspprev==0)&&(rs!=0))
-            { rpos=rinpos; rspprev=rs; rfad=fade; wram=1; rinOderAus=1; nrend=rend; nrstart=rstart; }
-            else if(((rspprev!=0)&&(rs==0))&&(rinOderAus==1)){ rfad=fade; rinOderAus=0; }
-            if (rinOderAus)
-            {
-                if(rwr){
-                    if(((rpos>(nrend-(fade+1)))&&(rpos<(nrstart+(fade+1))))&&(rfad<0))
-                    { rinOderAus=0; rfad=fade; }
-                }else
+//inOderAus(from SachaBaronCohen's "Bruno" skit)-flag indicates if position is 'in'/'out' of a loop..
+//..if 'in' loop-boundary,save messages(pstart/pend/rstart/rend) internally(nstart/nend/nrstart/nrend)
+        if(oneshot)//ONESHOT_SECTION
+        {               //..........................ONESHOT-RECORDING
+            if((rspprev==0)&&(rs!=0))//on speed-change for 'on',check position from loop bounds..
+            {       //..setup fade-in/fade-out,internal one-shot flag(nshot),& pos/speed changes
+                rpos=rinpos; rfad=fade-1; wram=1; rnshot=1; rspprev=rs;
+                if(rwr)
                 {
-                    if(((rpos>(nrend-(fade+1)))||(rpos<(nrstart+(fade+1))))&&(rfad<0))
-                    { rinOderAus=0; rfad=fade; }
+                    if((rpos>(rend-fade))&&(rpos<(rstart+fade))){ rinOderAus=0; }
+                    else { rinOderAus=1; nrstart=rstart; nrend=rend; }
                 }
-                
-                if(rpos>bframes)rpos=0;  if(rpos<0)rpos=bframes; rndx=trunc(rpos); rpos+=rs;
-                if(rfad>=0)     //........................Fade-In
-                { b[rndx*bnc]=eas_func_up(rcL,fade,rfad)+eas_rec_up(b[rndx*bnc],fade,1-odb,rfad);rfad--; }
-                else{ b[rndx*bnc]=rcL+(b[rndx*bnc]*odb); };
+                else
+                {
+                    if((rpos>(rend-fade))||(rpos<(rstart+fade))){ rinOderAus=0; }
+                    else { rinOderAus=1; nrstart=rstart; nrend=rend; }
+                }
             }
-            else
+            else if(((rspprev!=0)&&(rs==0)) && rnshot){ rfad=fade-1; rnshot=0; }
+            
+            if(rnshot)//rnshot flag determines if the state is fading-in-recording/recording-regular..
+            {
+                if(rwr)
+                {
+                    if((rpos<(rend-fade))||(rpos>(rstart+fade)))
+                    { rinOderAus=1; nrstart=rstart; nrend=rend; }
+                }
+                else
+                {
+                    if((rpos<(rend-fade))&&(rpos>(rstart+fade)))
+                    { rinOderAus=1; nrstart=rstart; nrend=rend; }
+                }
+                if(rinOderAus)
+                {
+                    if(rwr)
+                    { if((rpos>=(nrend-fade))&&(rpos<=(nrstart+fade))){ rfad=fade-1; rnshot=0; } }
+                    else
+                    { if((rpos>=(nrend-fade))||(rpos<=(nrstart+fade))){ rfad=fade-1; rnshot=0; } }
+                }
+                        //buffer~-boundary constraint, and positional-increment
+                if(rpos>bframes)rpos=0;  if(rpos<0)rpos=bframes; rndx=rpos; rpos+=rs;
+                if(rfad>=0)//Fade-In
+                {
+                    b[rndx*bnc]=eas_func_up(rcL,fade,rfad)+eas_rec_up(b[rndx*bnc],fade,1-odb,rfad);
+                    rfad--;
+                }else{ b[rndx*bnc]=rcL+(b[rndx*bnc]*odb); };
+            }
+            else    //..or(when rnshot is 0, the state is) fading-out-recording/stopped-recording
             {
                 if(rfad>=0)
-                {
-                    if(rpos>bframes)rpos=0;  if(rpos<0)rpos=bframes; rndx=trunc(rpos); rpos+=rspprev;
+                {                 //....buffer~-boundary constraint, and positional-increment
+                    if(rpos>bframes)rpos=0;  if(rpos<0)rpos=bframes; rndx=rpos; rpos+=rspprev;
                     b[rndx*bnc]=eas_func_dwn(rcL,fade,rfad)+eas_rec_dwn(b[rndx*bnc],fade,1-odb,rfad);
-                    rfad--; if(rfad<0) { wram=0; }
-                }else rspprev=rs;
+                    rfad--; if(rfad<0) { wram=0; rspprev=rs; }
+                } else { rspprev=rs; }
             }
             
-            //.........................................PLAYBACK
-            if((spprev==0.0)&&(sp!=0.0))
-            { dpos=inpos; spprev=sp; pfad=fade; inOderAus=1; nend=pend; nstart=pstart; }
-            else if(((spprev!=0.0)&&(sp==0.0))&&(inOderAus==1)){ pfad=fade; inOderAus=0; }
-            if (inOderAus)
-            {
-                if(wr){
-                    if(((dpos>(nend-(fade+1)))&&(dpos<(nstart+(fade+1))))&&(pfad<0))
-                    { inOderAus=0; pfad=fade; }
-                }else
+            //......................................ONESHOT-PLAYBACK
+            if((spprev==0.0)&&(sp!=0.0))//on speed-change for 'on',check position from loop bounds..
+            {     //..setup fade-in/fade-out,internal one-shot flag(nshot),& position/speed changes
+                dpos=inpos; pfad=fade-1; nshot=1; spprev=sp;
+                if(wr)
                 {
-                    if(((dpos>(nend-(fade+1)))||(dpos<(nstart+(fade+1))))&&(pfad<0))
-                    { inOderAus=0; pfad=fade; }
+                    if((dpos>(pend-fade))&&(dpos<(pstart+fade))){ inOderAus=0; }
+                    else { inOderAus=1; nstart=pstart; nend=pend; }
                 }
-                
-                if(dpos>bframes)dpos-=(bframes+1);  if(dpos<0)dpos+=(bframes+1);  indx=trunc(dpos);
-                if(sp>0){ frac=dpos-indx; }else if(sp<0){ frac=1.0-(dpos-indx); }else frac=0.0; dpos+=sp;
+                else{ if((dpos>(pend-fade))||(dpos<(pstart+fade)))
+                { inOderAus=0; }else{ inOderAus=1; nstart=pstart; nend=pend; } }
+            }
+            else if(((spprev!=0.0)&&(sp==0.0)) && nshot){ pfad=fade-1; nshot=0; }
+            
+            if(nshot)    //nshot flag determines if the state is fading-in/playing-back-regular..
+            {
+                if(wr)
+                {
+                    if((dpos<(pend-fade))||(dpos>(pstart+fade)))
+                    { inOderAus=1; nstart=pstart; nend=pend; }
+                }
+                else
+                {
+                    if((dpos<(pend-fade))&&(dpos>(pstart+fade)))
+                    { inOderAus=1; nstart=pstart; nend=pend; }
+                }
+                if(inOderAus)
+                {
+                    if(wr){ if((dpos>=(nend-fade))&&(dpos<=(nstart+fade))){ pfad=fade-1; nshot=0; } }
+                    else{ if((dpos>=(nend-fade))||(dpos<=(nstart+fade))){ pfad=fade-1; nshot=0; } }
+                }
+                //buffer~-boundary constraint, positional-increment, and bicubic interpolation
+                if(dpos>bframes)dpos-=(bframes+1);  if(dpos<0)dpos+=(bframes+1); indx=trunc(dpos);
+                if(sp>0){frac=dpos-indx;}else if(sp<0){frac=1.0-(dpos-indx);}else frac=0.0; dpos+=sp;
                 interp_index(indx,&indxz,&indxb,&indxc,sp,bframes);
                 xL = interp(frac, b[indxz*bnc], b[indx*bnc], b[indxb*bnc], b[indxc*bnc]);
-                //.......................Fade-In
+                //fade-in
                 if(pfad>=0){ oL=eas_func_up(xL,fade,pfad); pfad--; }
-                else if(xfad>=0)//..Crossfades(happen at loop-points,phase-changes,and abrupt pos/neg)
-                {
-                    if(xpos>bframes)xpos-=(bframes+1); if(xpos<0)xpos+=(bframes+1); indx=trunc(xpos);
-                    if(sp>0){frac=xpos-indx;}else if(sp<0){frac=1.0-(xpos-indx);}else frac=0.0;
-                    xpos+=sp;
-                    interp_index(indx,&indxz,&indxb,&indxc,sp,bframes);
-                    oL = interp(frac, b[indxz*bnc], b[indx*bnc], b[indxb*bnc], b[indxc*bnc]);
-                    oL = eas_func_up(xL, fade, xfad) + eas_func_dwn(oL, fade, xfad); xfad--;
-                }else{ oL=xL; }  //..<-Regular Playback + Phase-History
+                else{ oL=xL; }
             }
-            else
-            {//......................................Fade-Out
-                    if(pfad>=0)
-                    {
-                        if(dpos>bframes)dpos-=(bframes+1); if(dpos<0)dpos+=(bframes+1); indx=trunc(dpos);
-                        if(spd>0){frac=dpos-indx;}else if(spd<0){frac=1.0-(dpos-indx);}else frac=0.0;
-                        dpos+=spprev;
-                        interp_index(indx,&indxz,&indxb,&indxc,sp,bframes);
-                        xL = interp(frac, b[indxz*bnc], b[indx*bnc], b[indxb*bnc], b[indxc*bnc]);
-                        oL = eas_func_dwn(xL, fade, pfad); pfad--;
-                    }else{ oL = 0.; spprev=sp; }  //.........<-Everything Off
+            else        //..or(when nshot is 0, the state is) fading-out/silenced
+            {//fade-Out
+                if(pfad>=0)
+                { //buffer~-boundary constraint, positional-increment, and bicubic interpolation
+                    if(dpos>bframes)dpos-=(bframes+1); if(dpos<0)dpos+=(bframes+1); indx=trunc(dpos);
+                    if(spd>0){frac=dpos-indx;}else if(spd<0){frac=1.0-(dpos-indx);}else frac=0.0;
+                    dpos+=spprev;
+                    interp_index(indx,&indxz,&indxb,&indxc,sp,bframes);
+                    xL = interp(frac, b[indxz*bnc], b[indx*bnc], b[indxb*bnc], b[indxc*bnc]);
+                    oL = eas_func_dwn(xL, fade, pfad);
+                    pfad--; if(pfad<0)spprev=sp;
+                }else{ oL = 0.; spprev=sp; }  //.........<-Everything Off
             }
         }
-        else
-        {
+        else//LOOPER_(not_oneshot)_SECTION
+        {       //................................LOOPER-RECORDING
             if((rs!=rspprev)&&(rfad<0))
             {
-                if(((rspprev==0)&&(rs!=0))&&(rfad<0)){ rfad=fade; wram=1; rspprev=rs; }
-                else if (((rspprev!=0)&&(rs==0))&&(rfad<0)){ rfad=fade; }
-                else if(((rspprev<0)&&(rs>0))||((rspprev>0)&&(rs<0))){rxfad=fade;rxpos=rpos;}
-            }//onoff
+                if(((rspprev==0)&&(rs!=0))&&(rfad<0)){ rfad=fade-1; wram=1; rspprev=rs; }
+                else if (((rspprev!=0)&&(rs==0))&&(rfad<0)){ rfad=fade-1; }
+                else if(((rspprev<0)&&(rs>0))||((rspprev>0)&&(rs<0))){ rxfad=fade; rxpos=rpos; }
+            }
             
             if(rs!=0)
             {
@@ -1221,10 +1291,10 @@ void rez_mperform64(t_rez *x, t_object *d64, double **is, long numis, double **o
                             rinOderAus=0; else rinOderAus=1;
                     }
                 }
-                
+                                            //recording-crossfade at loop boundaries
                 if((rinOderAus)&&(rxfad<0))
-                {
-                    if(rparamch){ rparamch=0; nrend=rend; nrstart=rstart; }
+                {                                //rparamch = flag to notify when there's incoming..
+                    if(rparamch){ rparamch=0; nrend=rend; nrstart=rstart; }//..message-set loop-bounds
                     if(rwr){
                         if((rpos>nrend)&&(rpos<nrstart))
                         {
@@ -1239,8 +1309,8 @@ void rez_mperform64(t_rez *x, t_object *d64, double **is, long numis, double **o
                         }
                     }
                 }
-                else
-                {
+                else        //if starting off outside of loop-boundaries, record until within...
+                {       //..and once within, save messages(rstart/rend) internally(nrstart/nrend)
                     if(rwr)
                     {if((rpos<=rend)||(rpos>=rstart))
                     {rparamch=0; rinOderAus=1; nrend=rend; nrstart=rstart;}}
@@ -1251,27 +1321,29 @@ void rez_mperform64(t_rez *x, t_object *d64, double **is, long numis, double **o
                 
                 if(rpos>bframes)rpos=0;  if(rpos<0)rpos=bframes; rndx=trunc(rpos); rpos+=rs;
                 if(rxfad>=0) //....Crossfades(happen at loop-points and phase changes)
-                {
+                {                    //crossfade-point buffer~-boundary constraint and increment
                     if(rxpos>bframes)rxpos=0; if(rxpos<0)rxpos=bframes; rxdx=trunc(rxpos); rxpos+=rs;
                     b[rxdx*bnc]=eas_func_dwn(rcL,fade,rxfad)+eas_rec_dwn(b[rxdx*bnc],fade,1-odb,rxfad);
                     b[rndx*bnc]=eas_func_up(rcL,fade,rxfad)+eas_rec_up(b[rndx*bnc],fade,1-odb,rxfad);
                     rxfad--;
                 }
-                else if(rfad>=0)     //........................Fade-In
-                { b[rndx*bnc]=eas_func_up(rcL,fade,rfad)+eas_rec_up(b[rndx*bnc],fade,1-odb,rfad); }
-                else{ b[rndx*bnc]=rcL+(b[rndx*bnc]*odb); }
+                else if(rfad>=0)     //...................Fade-In
+                {
+                    b[rndx*bnc]=eas_func_up(rcL,fade,rfad)+eas_rec_up(b[rndx*bnc],fade,1-odb,rfad);
+                    rfad--;
+                } else { b[rndx*bnc]=rcL+(b[rndx*bnc]*odb); }
             }
             else
-            {       //.......................................Fade-Out
+            {       //...................................Fade-Out
                 if(rfad>=0)
                 {
                     if(rpos>bframes)rpos=0;  if(rpos<0)rpos=bframes; rndx=trunc(rpos); rpos+=rspprev;
                     b[rndx*bnc]=eas_func_dwn(rcL,fade,rfad)+eas_rec_dwn(b[rndx*bnc],fade,1-odb,rfad);
                     rfad--; if(rfad<0) { wram=0; rspprev=rs; }
-                }
+                }else{ rspprev=rs; }
             }
             
-            //.........................................PLAYBACK
+                //.....................................LOOPER-PLAYBACK
             if((sp!=spprev)&&(xfad<0))
             {if((((spprev==0.0)&&(sp!=0.0))||((spprev!=0.0)&&(sp==0.0)))&&(pfad<0)){pfad=fade;}//onoff
             else if(((spprev<0)&&(sp>0))||((spprev>0)&&(sp<0))){xfad=fade;xpos=dpos;}}//xfad neg<->pos
@@ -1285,7 +1357,7 @@ void rez_mperform64(t_rez *x, t_object *d64, double **is, long numis, double **o
                     if(pfad<0){xfad=fade; xpos=dpos;} phprev=dpos=inpos;
                 }
                 if(pparamch)
-                {                                               //window changes
+                {                                      //window changes
                     if(wr){
                         if(((dpos>pend)&&(dpos<pstart))&&((pend>nend)||(pstart<nstart)))
                             inOderAus=0; else inOderAus=1;
@@ -1294,7 +1366,7 @@ void rez_mperform64(t_rez *x, t_object *d64, double **is, long numis, double **o
                             inOderAus=0; else inOderAus=1;
                     }
                 }
-                
+                                                //crossfade at playback-loop boundaries
                 if((inOderAus)&&(xfad<0))
                 {
                     if(pparamch){ pparamch=0; nend=pend; nstart=pstart; }
@@ -1312,8 +1384,8 @@ void rez_mperform64(t_rez *x, t_object *d64, double **is, long numis, double **o
                         }
                     }
                 }
-                else
-                {
+                else        //if starting off outside of loop-boundaries, play until within...
+                {         //..and once within, save messages(pstart/pend) internally(nstart/nend)
                     if(wr)
                     {if((dpos<=pend)||(dpos>=pstart)){pparamch=0; inOderAus=1; nend=pend; nstart=pstart;}}
                     else
@@ -1324,8 +1396,9 @@ void rez_mperform64(t_rez *x, t_object *d64, double **is, long numis, double **o
                 if(sp>0){ frac=dpos-indx; }else if(sp<0){ frac=1.0-(dpos-indx); }else frac=0.0; dpos+=sp;
                 interp_index(indx,&indxz,&indxb,&indxc,sp,bframes);
                 xL = interp(frac, b[indxz*bnc], b[indx*bnc], b[indxb*bnc], b[indxc*bnc]);
-                //.......................Fade-In
-                if(pfad>=0){ oL=eas_func_up(xL,fade,pfad); pfad--; }
+                
+                if(pfad>=0)   //.......................Fade-In
+                { oL=eas_func_up(xL,fade,pfad); pfad--; }
                 else if(xfad>=0)//..Crossfades(happen at loop-points,phase-changes,and abrupt pos/neg)
                 {
                     if(xpos>bframes)xpos-=(bframes+1); if(xpos<0)xpos+=(bframes+1); indx=trunc(xpos);
@@ -1334,7 +1407,7 @@ void rez_mperform64(t_rez *x, t_object *d64, double **is, long numis, double **o
                     interp_index(indx,&indxz,&indxb,&indxc,sp,bframes);
                     oL = interp(frac, b[indxz*bnc], b[indx*bnc], b[indxb*bnc], b[indxc*bnc]);
                     oL = eas_func_up(xL, fade, xfad) + eas_func_dwn(oL, fade, xfad); xfad--;
-                }else{ oL=xL; }  //..<-Regular Playback + Phase-History
+                }else{ oL=xL; }  //..<-Regular Playback
                 spprev=sp;
             }
             else
@@ -1347,21 +1420,24 @@ void rez_mperform64(t_rez *x, t_object *d64, double **is, long numis, double **o
                     interp_index(indx,&indxz,&indxb,&indxc,sp,bframes);
                     xL = interp(frac, b[indxz*bnc], b[indx*bnc], b[indxb*bnc], b[indxc*bnc]);
                     oL = eas_func_dwn(xL, fade, pfad); pfad--;
-                    if(pfad<=0)spprev=sp;
-                }else{ oL = 0.; }  //.........<-Everything Off
+                    if(pfad<0)spprev=sp;
+                }else{ oL = 0.; spprev=sp; }  //<-Everything Off
             }
             
-            if(wram)
-            {
+            if(wram)    //..calculate abs-difference between playhead and recordhead..
+            {   //..if difference is within fade time, use difference to drive ducking of playhead
                 if(sp!=(double)rs)
-                { dfrnc=fabs(rpos-dpos); if(dfrnc<=(fade*2)){ oL=eas_func_dwn(oL,(fade*2),dfrnc); } }
+                {
+                    dfrnc = fabs(rpos-dpos);
+                    if(dfrnc<(fade*2.7489)){ oL=eas_func_dwn(oL,(fade*2.7489),dfrnc); }
+                }
             }
         }
         
         oPh=dpos/bframes; oRPh=rpos/bframes;//<-convert samp-index 2 phase
         *outL++ = oL; *outPh++ = oPh; *outRPh++ = oRPh;
     }
-    if(wram)buffer_setdirty(buffer); buffer_unlocksamples(buffer);
+    if(wram)buffer_setdirty(buffer); buffer_unlocksamples(buffer); x->nshot=nshot; x->rnshot=rnshot;
     x->pparamchange=pparamch; x->rparamchange=rparamch; x->xfad=xfad; x->pfad=pfad; x->xpos=xpos;
     x->phprev=phprev; x->rphprev=rphprev; x->spprev=spprev; x->rspprev=rspprev; x->rxpos=rxpos;
     x->dpos=dpos; x->rpos=rpos; x->inOderAus=inOderAus; x->rinOderAus=rinOderAus; x->rfad=rfad;
@@ -1379,70 +1455,80 @@ void rez_pmperform64(t_rez *x, t_object *d64, double **is, long numis, double **
     t_double        *outPh = os[1];
 
     long         n=smps;                                           float *b;
-    t_double     phprev,inpos,dpos,sp,frac;
-    t_double     spprev,oL,oPh,xL,xpos,scldsr;
+    t_double     phprev,inpos,dpos,sp,frac,spprev,oL,oPh,xL,xpos,scldsr;
     t_ptr_int    bnc,bframes,pstart,pend,nstart,nend,indx,indxz,indxb,indxc,xfad,pfad,fade;
-    t_bool       wr,pparamch,inOderAus,oneshot;
+    t_bool       wr,pparamch,inOderAus,oneshot,nshot;
     t_buffer_obj *buffer=buffer_ref_getobject(x->buf);
 
     b = buffer_locksamples(buffer);                   if(!b||x->obj.z_disabled) goto zero;
-    if(x->buf_modd){ x->buf_modd=false; rez_limits(x); } oneshot=x->oneshot; nstart=x->nstart;
+    if(x->buf_modd){ x->buf_modd=false; rez_limits(x); } oneshot=x->oneshot; nshot=x->nshot; wr=x->wr;
     bnc=x->bchan; bframes=x->bframes-1; pstart=x->pstart; pend=x->pend; inOderAus=x->inOderAus;
-    pparamch=x->pparamchange; pfad=x->pfad; xfad=x->xfad; fade=x->fade; xpos=x->xpos;
-    wr=x->wr; phprev=x->phprev; spprev=x->spprev; dpos=x->dpos; scldsr=x->srscale; nend=x->nend;
+    pparamch=x->pparamchange; pfad=x->pfad; xfad=x->xfad; fade=x->fade; xpos=x->xpos; nstart=x->nstart;
+    phprev=x->phprev; spprev=x->spprev;  dpos=x->dpos; scldsr=x->srscale; nend=x->nend;
     
     while(n--)
     {
         inpos=*ph++; sp=*spd++;
         inpos=(inpos<0.0)?0.0:((inpos>1.0)?1.0:inpos); inpos*=bframes; sp*=scldsr;
-
-        if(oneshot)
-        {
-            if((spprev==0.0)&&(sp!=0.0))
-            { dpos=inpos; spprev=sp; pfad=fade; inOderAus=1; nend=pend; nstart=pstart; }
-            else if(((spprev!=0.0)&&(sp==0.0))&&(inOderAus==1)){ pfad=fade; inOderAus=0; }
-            if (inOderAus)
-            {
-                if(wr){
-                    if(((dpos>(nend-(fade+1)))&&(dpos<(nstart+(fade+1))))&&(pfad<0))
-                    { inOderAus=0; pfad=fade; }
-                }else
+//inOderAus(from SachaBaronCohen's "Bruno" skit)-flag indicates if position is 'in'/'out' of a loop..
+//..if 'in' loop-boundary,save messages(pstart/pend) internally(nstart/nend)
+        if(oneshot)//ONESHOT_SECTION
+        {   //......................................ONESHOT-PLAYBACK
+            if((spprev==0.0)&&(sp!=0.0))//on speed-change for 'on',check position from loop bounds..
+            {     //..setup fade-in/fade-out,internal one-shot flag(nshot),& position/speed changes
+                dpos=inpos; pfad=fade-1; nshot=1; spprev=sp;
+                if(wr)
                 {
-                    if(((dpos>(nend-(fade+1)))||(dpos<(nstart+(fade+1))))&&(pfad<0))
-                    { inOderAus=0; pfad=fade; }
+                    if((dpos>(pend-fade))&&(dpos<(pstart+fade))){ inOderAus=0; }
+                    else { inOderAus=1; nstart=pstart; nend=pend; }
                 }
-                
-                if(dpos>bframes)dpos-=(bframes+1);  if(dpos<0)dpos+=(bframes+1);  indx=trunc(dpos);
-                if(sp>0){ frac=dpos-indx; }else if(sp<0){ frac=1.0-(dpos-indx); }else frac=0.0; dpos+=sp;
+                else{ if((dpos>(pend-fade))||(dpos<(pstart+fade)))
+                { inOderAus=0; }else{ inOderAus=1; nstart=pstart; nend=pend; } }
+            }
+            else if(((spprev!=0.0)&&(sp==0.0)) && nshot){ pfad=fade-1; nshot=0; }
+            
+            if(nshot)    //nshot flag determines if the state is fading-in/playing-back-regular..
+            {
+                if(wr)
+                {
+                    if((dpos<(pend-fade))||(dpos>(pstart+fade)))
+                    { inOderAus=1; nstart=pstart; nend=pend; }
+                }
+                else
+                {
+                    if((dpos<(pend-fade))&&(dpos>(pstart+fade)))
+                    { inOderAus=1; nstart=pstart; nend=pend; }
+                }
+                if(inOderAus)
+                {
+                    if(wr){ if((dpos>=(nend-fade))&&(dpos<=(nstart+fade))){ pfad=fade-1; nshot=0; } }
+                    else{ if((dpos>=(nend-fade))||(dpos<=(nstart+fade))){ pfad=fade-1; nshot=0; } }
+                }
+                //buffer~-boundary constraint, positional-increment, and bicubic interpolation
+                if(dpos>bframes)dpos-=(bframes+1);  if(dpos<0)dpos+=(bframes+1); indx=trunc(dpos);
+                if(sp>0){frac=dpos-indx;}else if(sp<0){frac=1.0-(dpos-indx);}else frac=0.0; dpos+=sp;
                 interp_index(indx,&indxz,&indxb,&indxc,sp,bframes);
                 xL = interp(frac, b[indxz*bnc], b[indx*bnc], b[indxb*bnc], b[indxc*bnc]);
-                //.......................Fade-In
+                //fade-in
                 if(pfad>=0){ oL=eas_func_up(xL,fade,pfad); pfad--; }
-                else if(xfad>=0)//..Crossfades(happen at loop-points,phase-changes,and abrupt pos/neg)
-                {
-                    if(xpos>bframes)xpos-=(bframes+1); if(xpos<0)xpos+=(bframes+1); indx=trunc(xpos);
-                    if(sp>0){frac=xpos-indx;}else if(sp<0){frac=1.0-(xpos-indx);}else frac=0.0;
-                    xpos+=sp;
-                    interp_index(indx,&indxz,&indxb,&indxc,sp,bframes);
-                    oL = interp(frac, b[indxz*bnc], b[indx*bnc], b[indxb*bnc], b[indxc*bnc]);
-                    oL = eas_func_up(xL, fade, xfad) + eas_func_dwn(oL, fade, xfad);
-                }else{ oL=xL; }  //..<-Regular Playback + Phase-History
+                else{ oL=xL; }
             }
-            else
-            {//......................................Fade-Out
-                    if(pfad>=0)
-                    {
-                        if(dpos>bframes)dpos-=(bframes+1); if(dpos<0)dpos+=(bframes+1); indx=trunc(dpos);
-                        if(spd>0){frac=dpos-indx;}else if(spd<0){frac=1.0-(dpos-indx);}else frac=0.0;
-                        dpos+=spprev;
-                        interp_index(indx,&indxz,&indxb,&indxc,sp,bframes);
-                        xL = interp(frac, b[indxz*bnc], b[indx*bnc], b[indxb*bnc], b[indxc*bnc]);
-                        oL = eas_func_dwn(xL, fade, pfad); pfad--;
-                    }else{ oL = 0.; spprev=sp; }  //.........<-Everything Off
+            else        //..or(when nshot is 0, the state is) fading-out/silenced
+            {//fade-Out
+                if(pfad>=0)
+                { //buffer~-boundary constraint, positional-increment, and bicubic interpolation
+                    if(dpos>bframes)dpos-=(bframes+1); if(dpos<0)dpos+=(bframes+1); indx=trunc(dpos);
+                    if(spd>0){frac=dpos-indx;}else if(spd<0){frac=1.0-(dpos-indx);}else frac=0.0;
+                    dpos+=spprev;
+                    interp_index(indx,&indxz,&indxb,&indxc,sp,bframes);
+                    xL = interp(frac, b[indxz*bnc], b[indx*bnc], b[indxb*bnc], b[indxc*bnc]);
+                    oL = eas_func_dwn(xL, fade, pfad);
+                    pfad--; if(pfad<0)spprev=sp;
+                }else{ oL = 0.; spprev=sp; }  //.........<-Everything Off
             }
         }
-        else
-        {
+        else//LOOPER_(not_oneshot)_SECTION
+        {       //.....................................LOOPER-PLAYBACK
             if((sp!=spprev)&&(xfad<0))
             {if((((spprev==0.0)&&(sp!=0.0))||((spprev!=0.0)&&(sp==0.0)))&&(pfad<0)){pfad=fade;}//onoff
             else if(((spprev<0)&&(sp>0))||((spprev>0)&&(sp<0))){xfad=fade;xpos=dpos;}}//xfad neg<->pos
@@ -1456,7 +1542,7 @@ void rez_pmperform64(t_rez *x, t_object *d64, double **is, long numis, double **
                     if(pfad<0){xfad=fade; xpos=dpos;} phprev=dpos=inpos;
                 }
                 if(pparamch)
-                {                                               //window changes
+                {                                      //window changes
                     if(wr){
                         if(((dpos>pend)&&(dpos<pstart))&&((pend>nend)||(pstart<nstart)))
                             inOderAus=0; else inOderAus=1;
@@ -1465,7 +1551,7 @@ void rez_pmperform64(t_rez *x, t_object *d64, double **is, long numis, double **
                             inOderAus=0; else inOderAus=1;
                     }
                 }
-                
+                                                //crossfade at playback-loop boundaries
                 if((inOderAus)&&(xfad<0))
                 {
                     if(pparamch){ pparamch=0; nend=pend; nstart=pstart; }
@@ -1483,8 +1569,8 @@ void rez_pmperform64(t_rez *x, t_object *d64, double **is, long numis, double **
                         }
                     }
                 }
-                else
-                {
+                else        //if starting off outside of loop-boundaries, play until within...
+                {         //..and once within, save messages(pstart/pend) internally(nstart/nend)
                     if(wr)
                     {if((dpos<=pend)||(dpos>=pstart)){pparamch=0; inOderAus=1; nend=pend; nstart=pstart;}}
                     else
@@ -1495,7 +1581,7 @@ void rez_pmperform64(t_rez *x, t_object *d64, double **is, long numis, double **
                 if(sp>0){ frac=dpos-indx; }else if(sp<0){ frac=1.0-(dpos-indx); }else frac=0.0; dpos+=sp;
                 interp_index(indx,&indxz,&indxb,&indxc,sp,bframes);
                 xL = interp(frac, b[indxz*bnc], b[indx*bnc], b[indxb*bnc], b[indxc*bnc]);
-
+                
                 if(pfad>=0)   //.......................Fade-In
                 { oL=eas_func_up(xL,fade,pfad); pfad--; }
                 else if(xfad>=0)//..Crossfades(happen at loop-points,phase-changes,and abrupt pos/neg)
@@ -1506,7 +1592,7 @@ void rez_pmperform64(t_rez *x, t_object *d64, double **is, long numis, double **
                     interp_index(indx,&indxz,&indxb,&indxc,sp,bframes);
                     oL = interp(frac, b[indxz*bnc], b[indx*bnc], b[indxb*bnc], b[indxc*bnc]);
                     oL = eas_func_up(xL, fade, xfad) + eas_func_dwn(oL, fade, xfad); xfad--;
-                }else{ oL=xL; }  //..<-Regular Playback + Phase-History
+                }else{ oL=xL; }  //..<-Regular Playback
                 spprev=sp;
             }
             else
@@ -1519,17 +1605,17 @@ void rez_pmperform64(t_rez *x, t_object *d64, double **is, long numis, double **
                     interp_index(indx,&indxz,&indxb,&indxc,sp,bframes);
                     xL = interp(frac, b[indxz*bnc], b[indx*bnc], b[indxb*bnc], b[indxc*bnc]);
                     oL = eas_func_dwn(xL, fade, pfad); pfad--;
-                    if(pfad<=0)spprev=sp;
-                }else{ oL = 0.; }  //.........<-Everything Off
+                    if(pfad<0)spprev=sp;
+                }else{ oL = 0.; spprev=sp; }  //<-Everything Off
             }
         }
         
         oPh=dpos/bframes; //<-convert samp-index 2 phase
         *outL++ = oL; *outPh++ = oPh;
     }
-    buffer_unlocksamples(buffer);
-    x->pparamchange=pparamch; x->xfad=xfad; x->pfad=pfad; x->xpos=xpos; x->phprev=phprev;
-    x->dpos=dpos; x->inOderAus=inOderAus; x->nend=nend; x->nstart=nstart; x->spprev=spprev;
+    buffer_unlocksamples(buffer); x->nshot=nshot; x->pparamchange=pparamch; x->xfad=xfad;
+    x->pfad=pfad; x->xpos=xpos; x->phprev=phprev; x->spprev=spprev; x->dpos=dpos;
+    x->inOderAus=inOderAus; x->nend=nend; x->nstart=nstart;
     return;
     
 zero: while(n--){ *outL++=0.; *outPh++=0.; }
@@ -1546,63 +1632,86 @@ void rez_rmperform64(t_rez *x, t_object *d64, double **is, long numis, double **
     long         n=smps;                                           float *b;
     t_double     rcL,rpos,rxpos,rsp,oRPh,odb,rphprev,rinpos;
     t_ptr_int    rndx,rxdx,bnc,bframes,rstart,rend,nrstart,nrend,rfad,rxfad,fade,rs,rspprev;
-    t_bool       rwr,rparamch,rinOderAus,wram,oneshot;
+    t_bool       rwr,rparamch,rinOderAus,wram,oneshot,rnshot;
     t_buffer_obj *buffer=buffer_ref_getobject(x->buf);
 
     b = buffer_locksamples(buffer);                   if(!b||x->obj.z_disabled) goto zero;
-    if(x->buf_modd){ x->buf_modd=false; rez_limits(x); } oneshot=x->oneshot; wram=x->wram;
-    bnc=x->bchan; bframes=x->bframes-1; fade=x->fade; nrend=x->nrend; nrstart=x->nrstart; rwr=x->rwr;
-    rparamch=x->rparamchange; rfad=x->rfad; rstart=x->rstart; rend=x->rend; rphprev=x->rphprev;
-    rxfad=x->rxfad; rxpos=x->rxpos; rspprev=x->rspprev; rinOderAus=x->rinOderAus; rpos=x->rpos;
+    if(x->buf_modd){ x->buf_modd=false; rez_limits(x); } oneshot=x->oneshot;
+    bnc=x->bchan; bframes=x->bframes-1; fade=x->fade; rpos=x->rpos; rparamch=x->rparamchange;
+    rfad=x->rfad; rstart=x->rstart; rend=x->rend; rnshot=x->rnshot; rphprev=x->rphprev;
+    wram=x->wram; nrend=x->nrend; nrstart=x->nrstart; rxfad=x->rxfad; rxpos=x->rxpos;
+    rspprev=x->rspprev; rwr=x->rwr; rinOderAus=x->rinOderAus;
     
     while(n--)
     {
         rinpos=*rph++; rsp=*rspd++; odb=*ovdb++; rcL=*rinL++;
         rinpos=(rinpos<0.0)?0.0:((rinpos>1.0)?1.0:rinpos); rinpos*=bframes;
         if(rsp>0.0) rs=1; else if(rsp<0.0) rs=-1; else rs=0;
-        
-                        //.........................................RECORDING
-        if(oneshot)
-        {
-            if((rspprev==0)&&(rs!=0))
-            { rpos=rinpos; rspprev=rs; rfad=fade; wram=1; rinOderAus=1; nrend=rend; nrstart=rstart; }
-            else if(((rspprev!=0)&&(rs==0))&&(rinOderAus==1)){ rfad=fade; rinOderAus=0; }
-            if (rinOderAus)
-            {
-                if(rwr){
-                    if(((rpos>(nrend-(fade+1)))&&(rpos<(nrstart+(fade+1))))&&(rfad<0))
-                    { rinOderAus=0; rfad=fade; }
-                }else
+//inOderAus(from SachaBaronCohen's "Bruno" skit)-flag indicates if position is 'in'/'out' of a loop..
+//..if 'in' loop-boundary,save messages(pstart/pend/rstart/rend) internally(nstart/nend/nrstart/nrend)
+        if(oneshot)//ONESHOT_SECTION
+        {               //..........................ONESHOT-RECORDING
+            if((rspprev==0)&&(rs!=0))//on speed-change for 'on',check position from loop bounds..
+            {       //..setup fade-in/fade-out,internal one-shot flag(nshot),& pos/speed changes
+                rpos=rinpos; rfad=fade-1; wram=1; rnshot=1; rspprev=rs;
+                if(rwr)
                 {
-                    if(((rpos>(nrend-(fade+1)))||(rpos<(nrstart+(fade+1))))&&(rfad<0))
-                    { rinOderAus=0; rfad=fade; }
+                    if((rpos>(rend-fade))&&(rpos<(rstart+fade))){ rinOderAus=0; }
+                    else { rinOderAus=1; nrstart=rstart; nrend=rend; }
                 }
-                
-                if(rpos>bframes)rpos=0;  if(rpos<0)rpos=bframes; rndx=trunc(rpos); rpos+=rs;
-                if(rfad>=0)     //........................Fade-In
+                else
+                {
+                    if((rpos>(rend-fade))||(rpos<(rstart+fade))){ rinOderAus=0; }
+                    else { rinOderAus=1; nrstart=rstart; nrend=rend; }
+                }
+            }
+            else if(((rspprev!=0)&&(rs==0)) && rnshot){ rfad=fade-1; rnshot=0; }
+            
+            if(rnshot)//rnshot flag determines if the state is fading-in-recording/recording-regular..
+            {
+                if(rwr)
+                {
+                    if((rpos<(rend-fade))||(rpos>(rstart+fade)))
+                    { rinOderAus=1; nrstart=rstart; nrend=rend; }
+                }
+                else
+                {
+                    if((rpos<(rend-fade))&&(rpos>(rstart+fade)))
+                    { rinOderAus=1; nrstart=rstart; nrend=rend; }
+                }
+                if(rinOderAus)
+                {
+                    if(rwr)
+                    { if((rpos>=(nrend-fade))&&(rpos<=(nrstart+fade))){ rfad=fade-1; rnshot=0; } }
+                    else
+                    { if((rpos>=(nrend-fade))||(rpos<=(nrstart+fade))){ rfad=fade-1; rnshot=0; } }
+                }
+                        //buffer~-boundary constraint, and positional-increment
+                if(rpos>bframes)rpos=0;  if(rpos<0)rpos=bframes; rndx=rpos; rpos+=rs;
+                if(rfad>=0)//Fade-In
                 {
                     b[rndx*bnc]=eas_func_up(rcL,fade,rfad)+eas_rec_up(b[rndx*bnc],fade,1-odb,rfad);
                     rfad--;
                 }else{ b[rndx*bnc]=rcL+(b[rndx*bnc]*odb); };
             }
-            else
+            else    //..or(when rnshot is 0, the state is) fading-out-recording/stopped-recording
             {
                 if(rfad>=0)
-                {
-                    if(rpos>bframes)rpos=0;  if(rpos<0)rpos=bframes; rndx=trunc(rpos); rpos+=rspprev;
+                {                 //....buffer~-boundary constraint, and positional-increment
+                    if(rpos>bframes)rpos=0;  if(rpos<0)rpos=bframes; rndx=rpos; rpos+=rspprev;
                     b[rndx*bnc]=eas_func_dwn(rcL,fade,rfad)+eas_rec_dwn(b[rndx*bnc],fade,1-odb,rfad);
-                    rfad--; if(rfad<0) { wram=0; }
-                }else rspprev=rs;
+                    rfad--; if(rfad<0) { wram=0; rspprev=rs; }
+                } else { rspprev=rs; }
             }
         }
-        else
-        {
+        else//LOOPER_(not_oneshot)_SECTION
+        {       //................................LOOPER-RECORDING
             if((rs!=rspprev)&&(rfad<0))
             {
-                if(((rspprev==0)&&(rs!=0))&&(rfad<0)){ rfad=fade; wram=1; rspprev=rs; }
-                else if (((rspprev!=0)&&(rs==0))&&(rfad<0)){ rfad=fade; }
-                else if(((rspprev<0)&&(rs>0))||((rspprev>0)&&(rs<0))){rxfad=fade;rxpos=rpos;}
-            }//onoff
+                if(((rspprev==0)&&(rs!=0))&&(rfad<0)){ rfad=fade-1; wram=1; rspprev=rs; }
+                else if (((rspprev!=0)&&(rs==0))&&(rfad<0)){ rfad=fade-1; }
+                else if(((rspprev<0)&&(rs>0))||((rspprev>0)&&(rs<0))){ rxfad=fade; rxpos=rpos; }
+            }
             
             if(rs!=0)
             {
@@ -1623,10 +1732,10 @@ void rez_rmperform64(t_rez *x, t_object *d64, double **is, long numis, double **
                             rinOderAus=0; else rinOderAus=1;
                     }
                 }
-                
+                                            //recording-crossfade at loop boundaries
                 if((rinOderAus)&&(rxfad<0))
-                {
-                    if(rparamch){ rparamch=0; nrend=rend; nrstart=rstart; }
+                {                                //rparamch = flag to notify when there's incoming..
+                    if(rparamch){ rparamch=0; nrend=rend; nrstart=rstart; }//..message-set loop-bounds
                     if(rwr){
                         if((rpos>nrend)&&(rpos<nrstart))
                         {
@@ -1641,8 +1750,8 @@ void rez_rmperform64(t_rez *x, t_object *d64, double **is, long numis, double **
                         }
                     }
                 }
-                else
-                {
+                else        //if starting off outside of loop-boundaries, record until within...
+                {       //..and once within, save messages(rstart/rend) internally(nrstart/nrend)
                     if(rwr)
                     {if((rpos<=rend)||(rpos>=rstart))
                     {rparamch=0; rinOderAus=1; nrend=rend; nrstart=rstart;}}
@@ -1653,34 +1762,35 @@ void rez_rmperform64(t_rez *x, t_object *d64, double **is, long numis, double **
                 
                 if(rpos>bframes)rpos=0;  if(rpos<0)rpos=bframes; rndx=trunc(rpos); rpos+=rs;
                 if(rxfad>=0) //....Crossfades(happen at loop-points and phase changes)
-                {
+                {                    //crossfade-point buffer~-boundary constraint and increment
                     if(rxpos>bframes)rxpos=0; if(rxpos<0)rxpos=bframes; rxdx=trunc(rxpos); rxpos+=rs;
                     b[rxdx*bnc]=eas_func_dwn(rcL,fade,rxfad)+eas_rec_dwn(b[rxdx*bnc],fade,1-odb,rxfad);
                     b[rndx*bnc]=eas_func_up(rcL,fade,rxfad)+eas_rec_up(b[rndx*bnc],fade,1-odb,rxfad);
                     rxfad--;
                 }
-                else if(rfad>=0)     //........................Fade-In
+                else if(rfad>=0)     //...................Fade-In
                 {
                     b[rndx*bnc]=eas_func_up(rcL,fade,rfad)+eas_rec_up(b[rndx*bnc],fade,1-odb,rfad);
                     rfad--;
                 } else { b[rndx*bnc]=rcL+(b[rndx*bnc]*odb); }
             }
             else
-            {       //.......................................Fade-Out
+            {       //...................................Fade-Out
                 if(rfad>=0)
                 {
                     if(rpos>bframes)rpos=0;  if(rpos<0)rpos=bframes; rndx=trunc(rpos); rpos+=rspprev;
                     b[rndx*bnc]=eas_func_dwn(rcL,fade,rfad)+eas_rec_dwn(b[rndx*bnc],fade,1-odb,rfad);
                     rfad--; if(rfad<0) { wram=0; rspprev=rs; }
-                }
+                }else{ rspprev=rs; }
             }
         }
+        
         oRPh=rpos/bframes;//<-convert samp-index 2 phase
         *outRPh++ = oRPh;
     }
-    if(wram)buffer_setdirty(buffer); buffer_unlocksamples(buffer); x->rparamchange=rparamch;
-    x->rphprev=rphprev; x->rspprev=rspprev; x->rxpos=rxpos; x->rpos=rpos; x->rinOderAus=rinOderAus;
-    x->rfad=rfad; x->nrend=nrend; x->nrstart=nrstart; x->rxfad=rxfad; x->wram=wram;
+    if(wram)buffer_setdirty(buffer); buffer_unlocksamples(buffer); x->rnshot=rnshot; x->wram=wram;
+    x->rparamchange=rparamch; x->rphprev=rphprev; x->rspprev=rspprev; x->rxpos=rxpos; x->rfad=rfad;
+    x->rpos=rpos; x->rinOderAus=rinOderAus; x->nrend=nrend; x->nrstart=nrstart; x->rxfad=rxfad;
     return;
     
 zero: while(n--){ *outRPh++=0.; }
